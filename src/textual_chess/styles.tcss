@@ -1,0 +1,44 @@
+ChessboardMock {
+    width: auto;
+    dock: left;
+}
+
+MainPanel {
+    padding-top: 1;
+}
+
+.chess-container {
+    # layout: grid;
+    grid-size: 2;
+    grid-columns: auto 1fr;
+    grid-rows: 30 1fr;
+
+    ChessBoard {
+        width: auto;
+        # border: solid green;
+    }
+    InfoPanel {
+        width: auto;
+        height: 26;
+        border: round white;
+        padding-top: 1;
+        padding-bottom: 1;
+
+        ScrollView {
+            height: 14;
+            margin-top: 2;
+            margin-bottom: 2;
+            # border: none;
+            # scrollbar-gutter: auto;
+            scrollbar-size: 0 0;
+        }
+    }
+}
+
+Grid > .span2 {
+    column-span: 2;
+}
+
+.center-content {
+    content-align: center middle;
+}
