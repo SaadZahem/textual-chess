@@ -1,37 +1,56 @@
-from textual.widgets import Static
-from textual.reactive import reactive
+import asyncio
+from collections import Counter
+import string
+import typing
+
+import chess
+
 from textual import events
 from textual.binding import Binding
-from textual.geometry import Size
 from textual.message import Message
-import chess
-from textual import work
-import asyncio
-from constants import (
-    PIECE_SYMBOLS,
-    LIGHT_SQUARE_COLOR,
-    DARK_SQUARE_COLOR,
-    WHITE_PIECE_COLOR,
+from textual.reactive import reactive, var
+from textual.timer import Timer
+from textual.widgets import Static
+
+from textual_chess.bot import Bot
+from textual_chess.chess import BetterBoard
+from textual_chess.constants import (
     BLACK_PIECE_COLOR,
     CURSOR_BORDER_COLOR,
+    DARK_SQUARE_COLOR,
     HIGHLIGHT_COLOR,
-    KING_CHECK_COLOR,
     HIGHLIGHT_COLOR_OUTLINE,
+    KING_CHECK_COLOR,
+    LIGHT_SQUARE_COLOR,
+    PIECE_SYMBOLS,
+    WHITE_PIECE_COLOR,
 )
-from bot import Bot
-from typing import Callable
 
 
 class MoveMade(Message):
-    def __init__(self, board: chess.Board):
+    def __init__(self, board: chess.Board, move: chess.Move):
         super().__init__()
         self.board = board
+        self.move = move
 
 
 class CaptureMade(MoveMade):
-    def __init__(self, board: chess.Board, capture: chess.Piece):
-        super().__init__(board)
+    def __init__(self, board: chess.Board, move: chess.Move, capture: chess.Piece):
+        super().__init__(board, move)
         self.capture = capture
+
+
+class TookBack(Message):
+    def __init__(self, board: chess.Board, move: chess.Move, capture: chess.Piece | None = None):
+        super().__init__()
+        self.board = board
+        self.move = move
+        self.capture = capture
+
+class BoardMessage(Message):
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
 
 
 class ChessboardMock(Static):
@@ -42,35 +61,29 @@ class ChessboardMock(Static):
         board_width = 8 * 5
         board_lines.append("  ┌" + title.center(board_width, "─") + "┐")
         for y in range(7, -1, -1):
-            line1 = "  │"
-            line2 = f"{y+1} │"
-            line3 = "  │"
+            line = " │"
             for x in range(8):
                 bg = LIGHT_SQUARE_COLOR if (x + y) % 2 == 0 else DARK_SQUARE_COLOR
-                line1 += f"[ {bg} ]     [/]"
-                line2 += f"[{bg}]     [/{bg}]"
-                line3 += f"[{bg}]     [/{bg}]"
-            line1 += "│"
-            line2 += "│"
-            line3 += "│"
-            board_lines.append(line1)
-            board_lines.append(line2)
-            board_lines.append(line3)
+                line += f"[{bg}]     [/]"
+            line += "│"
+            board_lines.append(' ' + line)
+            board_lines.append(str(y + 1) + line)
+            board_lines.append(' ' + line)
         board_lines.append("  └" + ("─" * board_width) + "┘")
-        files = "     a    b    c    d    e    f    g    h  "
+        files = ' ' * 3 + ''.join(char.center(5) for char in string.ascii_lowercase[:8])
         board_lines.append(files)
         return "\n".join(board_lines)
 
 
 class ChessBoard(Static):
     can_focus = True
-    board = reactive(chess.Board())
-    cursor_x = reactive(0)
-    cursor_y = reactive(7)
-    selected = reactive(None)  # The square that is currently selected
-    message = reactive("")
-    last_move = reactive(None)  # Track the last move
+    cursor_x = var(0)
+    cursor_y = var(7)
+    selected = var(None)  # The square that is currently selected
+    message = var("")
+    last_move = var(None)  # Track the last move
     show_menu = False
+    flipped = reactive(False)
 
     BINDINGS = [
         Binding("a,b,c,d,e,f,g,h", "move_file", "File", show=True),
@@ -80,13 +93,15 @@ class ChessBoard(Static):
         Binding("q", "quit", "Quit", show=True),
     ]
 
-    # def on_move_made(self, callback: Callable[[chess.Board], None]):
-    #     self.move_made_callback = callback
-
-    def __init__(self, *args, bot: Bot, **kwargs):
+    def __init__(self, *args, bot: Bot | None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.show_menu = False
         self.bot = bot
+        self.board = chess.Board()
+        self.bot_timer = None
+        self.transpositions = Counter()
+        self.game_over = False
+
+        self.transpositions.update((self.board._transposition_key(), ))
 
     def render(self) -> str:
         board_lines = []
@@ -110,12 +125,11 @@ class ChessBoard(Static):
                 if move.from_square == self.selected:
                     legal_moves.add(move.to_square)
 
-        for y in range(7, -1, -1):
-            line1 = "  │"
-            line2 = f"{y+1} │"
-            line3 = "  │"
+        for y in range(7, -1, -1) if not self.flipped else range(8):
+            lines = ['  │'] * 3
+            lines[1] = f'{y+1} │'
 
-            for x in range(8):
+            for x in range(8) if not self.flipped else range(7, -1, -1):
                 square = chess.square(x, y)
                 piece = self.board.piece_at(square)
                 is_cursor = self.cursor_x == x and self.cursor_y == y
@@ -126,7 +140,7 @@ class ChessBoard(Static):
                 )
 
                 # Square background color
-                bg = LIGHT_SQUARE_COLOR if (x + y) % 2 == 0 else DARK_SQUARE_COLOR
+                bg = LIGHT_SQUARE_COLOR if (x + y + int(self.flipped)) % 2 == 0 else DARK_SQUARE_COLOR
                 if king_in_check_square is not None and square == king_in_check_square:
                     bg = KING_CHECK_COLOR
                 elif is_last_move:
@@ -154,124 +168,106 @@ class ChessBoard(Static):
                         else BLACK_PIECE_COLOR
                     )
                     symbol = (
-                        f"[{color_tag}]{PIECE_SYMBOLS[piece.symbol()]}[/{color_tag}]"
+                        f"[{color_tag}]{PIECE_SYMBOLS[piece.symbol()]}[/]"
                     )
                 else:
                     symbol = " "
+                
+                # begin background color
+                for i in range(3):
+                    lines[i] += f'[{bg}]'
 
-                # Top line
+                # Top and bottom lines
                 if is_cursor:
-                    line1 += f"[{CURSOR_BORDER_COLOR} {bg}]+---+[/]"
+                    line = f"[{CURSOR_BORDER_COLOR}]+---+[/]"
                 elif show_outline:
-                    line1 += f"[{HIGHLIGHT_COLOR_OUTLINE} {bg}]+---+[/]"
+                    line = f"[{HIGHLIGHT_COLOR_OUTLINE}]+---+[/]"
                 else:
-                    line1 += f"[ {bg} ]     [/ ]"
+                    line = ' ' * 5
+                
+                lines[0] += line
+                lines[2] += line
+                dot = "[b]·[/]"
+                outline = f"[{HIGHLIGHT_COLOR_OUTLINE}]|[/]"
+                cursor = f"[{CURSOR_BORDER_COLOR}]|[/]"
 
                 # Middle line
                 if is_cursor:
-                    line2 += (
-                        f"[{bg}][{CURSOR_BORDER_COLOR}]| [/]"
-                        + (symbol if not show_dot else "[bold]·[/]")
-                        + f"[{CURSOR_BORDER_COLOR}] |[/][/{bg}]"
-                    )
+                    lines[1] += f"{cursor} {symbol if not show_dot else dot} {cursor}"
                 elif show_dot:
-                    line2 += f"[{bg}]  [bold]·[/]  [/]"
+                    lines[1] += f"  {dot}  "
                 elif show_outline:
-                    line2 += (
-                        f"[{bg}][{HIGHLIGHT_COLOR_OUTLINE}]| [/]"
-                        + symbol
-                        + f"[{HIGHLIGHT_COLOR_OUTLINE}] |[/][/ ]"
-                    )
+                    lines[1] += f"{outline} {symbol} {outline}"
                 else:
-                    line2 += f"[{bg}]  {symbol}  [/{bg}]"
+                    lines[1] += f"  {symbol}  "
+                
+                # end background color
+                for i in range(3):
+                    lines[i] += '[/]'
 
-                # Bottom line
-                if is_cursor:
-                    line3 += f"[{CURSOR_BORDER_COLOR} {bg}]+---+[/]"
-                elif show_outline:
-                    line3 += f"[{HIGHLIGHT_COLOR_OUTLINE} {bg}]+---+[/]"
-                else:
-                    line3 += f"[{bg}]     [/{bg}]"
-
-            line1 += "│"
-            line2 += "│"
-            line3 += "│"
-            board_lines.append(line1)
-            board_lines.append(line2)
-            board_lines.append(line3)
+            for line in lines:
+                board_lines.append(line + '│')
 
         # Bottom border
         board_lines.append("  └" + ("─" * board_width) + "┘")
 
         # Add file letters at the bottom
-        files = "     a    b    c    d    e    f    g    h  "
-        board_lines.append(files)
-
-        if self.board.is_checkmate():
-            board_lines.append("Checkmate!")
-        elif self.board.is_stalemate():
-            board_lines.append("Stalemate!")
-        elif self.board.is_check():
-            board_lines.append("Check!")
-
-        board_lines.append(self.message)
+        # When the board is flipped, the file letters are reversed
+        files = string.ascii_lowercase[:8]
+        loop = reversed if self.flipped else lambda x: x
+        board_lines.append(' ' * 3 + ''.join(char.center(5) for char in loop(files)))
         return "\n".join(board_lines)
 
     async def on_key(self, event: events.Key) -> None:
-        if self.show_menu:
-            if event.key == "r":
-                self.message = "You resigned. Game over."
-                self.show_menu = False
-                self.refresh()
-            elif event.key == "b":
-                from app import HomeScreen
-
-                self.app.mount(HomeScreen())
-                self.remove()
-            elif event.key == "escape":
-                self.show_menu = False
-                self.message = ""
-                self.refresh()
-            return
-
-        if event.key == "f1":
-            self.show_menu = True
-            self.message = "F1 Menu: r = resign, b = back to home, esc = cancel"
-            self.refresh()
-            return
-
         # File keys a-h
         if event.key in "abcdefgh":
             self.cursor_x = ord(event.key) - ord("a")
+
         # Rank keys 1-8
         elif event.key in "12345678":
             # Ranks are 1 (bottom) to 8 (top), y=0 is bottom, y=7 is top
             self.cursor_y = int(event.key) - 1
-        elif event.key == "left":
+        
+        # Fixes the up and down keys when the board is flipped
+        if self.flipped:
+            key = {
+                'left': 'right',
+                'right': 'left',
+                'up': 'down',
+                'down': 'up',
+            }.get(event.key, event.key)
+        else:
+            key = event.key
+
+        if key == "left":
             self.cursor_x = max(0, self.cursor_x - 1)
-        elif event.key == "right":
+        elif key == "right":
             self.cursor_x = min(7, self.cursor_x + 1)
-        elif event.key == "up":
+        elif key == "up":
             self.cursor_y = min(7, self.cursor_y + 1)
-        elif event.key == "down":
+        elif key == "down":
             self.cursor_y = max(0, self.cursor_y - 1)
+        
         elif event.key == "enter" or event.key == "space":
             await self.handle_square_selection()
 
         self.refresh()
 
     async def handle_square_selection(self):
-        if self.board.is_game_over():
+        if self.game_over:
             return
 
         square = chess.square(self.cursor_x, self.cursor_y)
         if self.selected is None:
             piece = self.board.piece_at(square)
-            if piece and piece.color == self.board.turn:
+            if piece and (
+                self.bot and piece.color == self.board.turn == chess.WHITE
+                or not self.bot and piece.color == self.board.turn
+            ):
                 self.selected = square
-                self.message = f"Selected {chess.square_name(square)}"
+                self.post_message(BoardMessage(f"Selected {chess.square_name(square)}"))
             else:
-                self.message = "Select your own piece."
+                self.post_message(BoardMessage("Select your own piece."))
         else:
             piece = self.board.piece_at(self.selected)
             move = chess.Move(self.selected, square)
@@ -283,33 +279,45 @@ class ChessBoard(Static):
                     move = chess.Move(self.selected, square, promotion=chess.QUEEN)
             if move in self.board.legal_moves:
                 if self.board.is_capture(move):
-                    capture = self.board.piece_at(move.to_square)
-                    if capture:
-                        self.post_message(CaptureMade(self.board, capture))
+                    capture = self.get_capture(move)
+                    self.post_message(CaptureMade(self.board, move, capture))
                 else:
-                    self.post_message(MoveMade(self.board))
+                    self.post_message(MoveMade(self.board, move))
                 self.board.push(move)
                 self.last_move = move  # Track last move
                 self.selected = None
-                self.message = ""
-                # self.refresh()  # Show user's move immediately
-                # self.app.refresh()  # Force screen refresh
-                self.run_worker(self.bot_move)
+                self.post_message(BoardMessage(""))
+
+                if self.bot:
+                    callback = lambda: self.run_worker(self.bot_move)
+                    self.bot_timer = self.set_timer(1, callback)
             else:
                 piece = self.board.piece_at(square)
                 if piece and piece.color == self.board.turn:
                     self.selected = square
-                    self.message = f"Selected {chess.square_name(square)}"
+                    self.post_message(BoardMessage(f"Selected {chess.square_name(square)}"))
                 else:
-                    self.message = f"Invalid move: {chess.square_name(self.selected)} to {chess.square_name(square)}."
+                    self.post_message(BoardMessage(
+                        f"Invalid move: {chess.square_name(self.selected)} to {chess.square_name(square)}.")
+                    )
                     self.selected = None
+        
+        if self.board.is_checkmate():
+            self.post_message(BoardMessage("Checkmate!"))
+        elif self.board.is_stalemate():
+            self.post_message(BoardMessage("Stalemate!"))
+        elif self.board.is_check():
+            self.post_message(BoardMessage("Check!"))
+
         self.refresh()
 
     async def bot_move(self):
-        await asyncio.sleep(1)  # 1 second delay
-        if self.board.is_game_over():
+        if self.game_over:
             return
-        
+
+        if self.bot is None:
+            return
+
         move = self.bot.choose_move(self.board)
         if move:
             piece = self.board.piece_at(move.from_square)
@@ -330,18 +338,47 @@ class ChessBoard(Static):
                         move.from_square, move.to_square, promotion=chess.QUEEN
                     )
             if move in self.board.legal_moves:
-                self.message = f"Bot played {self.board.san(move)}"
+                self.post_message(BoardMessage(f"Bot played {self.board.san(move)}"))
                 if self.board.is_capture(move):
                     capture = self.board.piece_at(move.to_square)
                     if capture:
-                        self.post_message(CaptureMade(self.board, capture))
+                        self.post_message(CaptureMade(self.board, move, capture))
                 else:
-                    self.post_message(MoveMade(self.board))
+                    self.post_message(MoveMade(self.board, move))
                 self.board.push(move)
                 self.last_move = move  # Track last move
             else:
-                self.message = "Bot attempted illegal move."
+                self.post_message(BoardMessage("Bot attempted illegal move."))
+        
+        # refresh is mandatory here
         self.refresh()
+
+    def on_move_made(self, message: MoveMade):
+        move = self.board.pop()
+        if self.board.is_irreversible(move):
+            self.transpositions.clear()
+            claim_draw = False
+        else:
+            key = self.board._transposition_key()
+            self.transpositions.update((key, ))
+            claim_draw = self.transpositions.get(key, 0) >= 3
+            # self.notify(f"Transposition: {key}")
+        
+        self.board.push(move)
+        self.check_outcome(claim_draw=claim_draw)
+        
+        if claim_draw and self.game_over:
+            self.notify("A draw was made")
+    
+    def on_capture_made(self, message: CaptureMade):
+        self.transpositions.clear()
+        self.check_outcome()
+    
+    def check_outcome(self, *, claim_draw: bool = False):
+        outcome = self.board.outcome(claim_draw=claim_draw)
+        if outcome:
+            self.game_over = True
+            self.post_message(BoardMessage(f"{outcome.result()}"))
 
     async def on_mouse_down(self, event: events.MouseDown) -> None:
         # Calculate the board's top-left corner in widget coordinates
@@ -357,15 +394,100 @@ class ChessBoard(Static):
         # Each square on the board is rendered as 5 characters wide and 3 lines tall
         square_width = 5  # Width of each square in characters
         square_height = 3  # Height of each square in lines
+        
         x = event.x - board_origin_x
         y = event.y - board_origin_y
+        
         if x < 0 or y < 0:
             return
+        
         board_x = x // square_width
         board_y = 7 - (y // square_height)
+        
         if not (0 <= board_x < 8 and 0 <= board_y < 8):
             return
+        
         self.cursor_x = board_x
         self.cursor_y = board_y
         await self.handle_square_selection()
         self.refresh()
+
+    def flip_board(self) -> None:
+        self.flipped = not self.flipped
+        # No need to flip the actual board, just the UI
+        # https://stackoverflow.com/questions/65661613/how-to-flip-a-chessboard-while-preserving-the-move-stack-in-python-chess
+        # chess.BaseBoard.apply_transform(self.board, chess.flip_vertical)
+        # chess.BaseBoard.apply_transform(self.board, chess.flip_horizontal)
+
+    def get_capture(self, move: chess.Move) -> chess.Piece:
+        capture = self.board.piece_at(move.to_square)
+        if not capture:
+            # En passant capture
+            if self.board.turn == chess.WHITE:
+                capture = self.board.piece_at(move.to_square - 8)
+            else:
+                capture = self.board.piece_at(move.to_square + 8)
+        
+        if not capture:
+            raise ValueError("No capture was found")
+        return capture
+
+    def _takeback(self):
+        move = self.board.pop()
+        self.transpositions[self.board._transposition_key()] -= 1
+        if self.board.is_capture(move):
+            self.post_message(TookBack(self.board.copy(), move, self.get_capture(move)))
+        else:
+            self.post_message(TookBack(self.board.copy(), move))
+        return move
+
+    def takeback(self) -> bool:
+        if self.game_over or self.board.is_game_over():
+            self.app.notify("Cannot take back. Game is over", severity="error")
+            return False
+
+        if self.board.turn == chess.WHITE:
+            # Could be the first move
+            if not self.board.move_stack:
+                self.app.notify("No moves to take back", severity="error")
+                return False
+            
+            # takes back black last move and continues to take back another move
+            move = self._takeback()
+
+            # When the bot is disabled, take back only one move at a time
+            if not self.bot:
+                self.selected = None
+                self.post_message(BoardMessage(f"Took back {self.board.san(move)}"))
+                self.refresh()
+                return True
+        elif self.bot:
+            # ISSUE: If the player played a move then took it back so quickly
+            # before the bot reacts could confuse the bot and so is the UI
+
+            timer = typing.cast(Timer, self.bot_timer)
+            timer.stop()
+            self.bot_timer = None
+        
+        if self.board.turn == chess.BLACK:
+            # If it is black's turn, there is at least one move in the stack
+            move = self._takeback()
+
+            if self.board.move_stack:
+                self.last_move = self.board.peek()
+            else:
+                self.last_move = None
+            
+            self.selected = None
+            self.post_message(BoardMessage(f"Took back {self.board.san(move)}"))
+        
+        self.refresh()
+        return True
+    
+    def claim_draw(self) -> bool:
+        if self.board.can_claim_draw():
+            self.notify("Draw claimed")
+            return True
+        else:
+            self.notify("Draw not claimed", severity="warning")
+            return False

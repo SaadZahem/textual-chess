@@ -1,6 +1,7 @@
-from textual.widgets import Static
-from textual.reactive import reactive, var
 import re
+
+from textual.reactive import reactive, var
+from textual.widgets import Static
 
 class ChessPlayer(Static):
     material = reactive('')

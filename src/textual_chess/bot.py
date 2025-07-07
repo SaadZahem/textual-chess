@@ -1,17 +1,21 @@
-import chess
 import random
-from chessplayer import ChessPlayer
 import re
-from minimax import minimax
+
+import chess
+
+from textual_chess.chessplayer import ChessPlayer
+from textual_chess.minimax import minimax
 
 
-def get_bot_by_type(bot_type: str) -> 'Bot':
+def get_bot_by_type(bot_type: str) -> 'Bot | None':
     if bot_type == 'random':
         return RandomBot()
     elif bot_type == 'greedy':
         return GreedyBot()
     elif bot_type == 'minimax':
         return MinimaxBot(depth=2)
+    elif bot_type == 'None':
+        return None
     else:
         raise ValueError(f"Invalid bot type: {bot_type}")
 

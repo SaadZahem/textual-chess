@@ -7,10 +7,12 @@ from textual.containers import Horizontal, HorizontalGroup, Vertical
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.screen import ModalScreen
+from textual.types import NoSelection
 from textual.widgets import Button, Footer, Header, Select, Static
 
-from chessboard import ChessboardMock
-from chesspage import ChessScreen
+from textual_chess.chessboard import ChessboardMock
+from textual_chess.chesspage import ChessScreen
+from textual_chess.dialog import ChessOptionsDialog
 
 
 class InstructionsPanel(Static):
@@ -33,12 +35,13 @@ class InstructionsPanel(Static):
 class MainPanel(Static):
     def compose(self) -> ComposeResult:
         with HorizontalGroup():
-            yield Button("New Game >", id="singleplayer")
+            yield Button("New Game >", variant="primary", id="singleplayer")
             yield Select(
                 [
                     ("Random Bot", "random"),
                     ("Greedy Bot", "greedy"),
                     ("Minimax Bot [dim](depth=2)[/]", "minimax"),
+                    ("None", "None"),  # The option to cancel bot response for debugging
                 ],
                 prompt="Choose Bot",
                 id="bot-select",
@@ -46,6 +49,11 @@ class MainPanel(Static):
             )
         yield Button("Multiplayer", id="multiplayer", disabled=True)
         yield Button("Instructions", id="help")
+        yield Button.warning("Show Modal", id="show-modal")
+
+    @on(Button.Pressed, "#show-modal")
+    def show_modal(self) -> None:
+        self.app.push_screen(ChessOptionsDialog())
 
     def on_mount(self) -> None:
         self.query_one(Button).focus()
@@ -56,7 +64,7 @@ class MainPanel(Static):
         if event.key == "right":
             if self.query_one("#singleplayer").has_focus:
                 if self.query_one(Select).disabled:
-                    self._toggle_bot_select()
+                    self.toggle_bot_select()
                 else:
                     self.query_one(Select).focus()
                 event.stop()
@@ -90,9 +98,9 @@ class MainPanel(Static):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "singleplayer":
-            self._toggle_bot_select()
+            self.toggle_bot_select()
 
-    def _toggle_bot_select(self) -> None:
+    def toggle_bot_select(self) -> None:
         bot_select = self.query_one("#bot-select", Select)
         bot_select.display = not bot_select.display
         bot_select.disabled = not bot_select.disabled
@@ -141,17 +149,17 @@ class ChessApp(App):
         yield self.homescreen
         yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        # Only handle buttons not handled by HomeScreen
-        # 'help', 'back-instructions', 'singleplayer', and 'multiplayer' are now handled by HomeScreen
-        pass
-
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "bot-select":
             bot_type = str(event.value) if event.value else "random"
-            # self.homescreen.remove()
+            
+            # important to not trigger the event again
+            with event.select.prevent(Select.Changed):
+                event.select.value = Select.BLANK
+            
+            self.query_one(MainPanel).toggle_bot_select()
             self.chessboard = ChessScreen(bot_type=bot_type)
-            self.push_screen(self.chessboard)
+            self.push_screen(self.chessboard)            
 
 
 def main() -> None:

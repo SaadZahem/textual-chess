@@ -35,10 +35,36 @@ MainPanel {
     }
 }
 
-Grid > .span2 {
-    column-span: 2;
+Grid {
+    &> .span2 {
+        column-span: 2;
+    }
+    &> .span3 {
+        column-span: 3;
+    }
 }
 
 .center-content {
     content-align: center middle;
+}
+
+Dialog {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+
+    &> * {
+        width: auto;
+        height: auto;
+        border: round rgba(170, 170, 0, 0.2);
+        background: transparent;
+
+        HorizontalGroup {
+            width: auto;
+        }
+
+        DialogButton {
+            
+        }
+    }
 }
