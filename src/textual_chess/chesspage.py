@@ -2,25 +2,50 @@ from operator import truediv
 import chess
 
 from rich.console import Console
+from operator import truediv
+import chess
+
+from rich.console import Console
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 
 from textual import await_complete
 from textual.app import ComposeResult
+from textual import await_complete
+from textual.app import ComposeResult
 from textual.containers import (
+    Grid,
+    Horizontal,
     Grid,
     Horizontal,
     HorizontalGroup,
     ScrollableContainer,
     Vertical,
+    Vertical,
     VerticalScroll,
 )
 from textual.events import Key
+from textual.events import Key
 from textual.geometry import Size
+from textual.reactive import Reactive, reactive, var
 from textual.reactive import Reactive, reactive, var
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
+from textual.strip import Strip
+from textual.widgets import Footer, Header, Static
+
+from textual_chess.bot import get_bot_by_type
+from textual_chess.chessboard import (
+    BoardMessage,
+    CaptureMade,
+    ChessBoard,
+    MoveMade,
+    TookBack,
+)
+from textual_chess.chessplayer import ChessPlayer
+from textual_chess.dialog import ChessOptionsDialog, ChessOptions
+from textual_chess.utils import strip_text
 from textual.strip import Strip
 from textual.widgets import Footer, Header, Static
 
@@ -112,7 +137,19 @@ class MessageBox(Static):
         return f"[blink]{self.message}[/]"
 
 
+class MessageBox(Static):
+    message = reactive("Placeholder")
+
+    def render(self) -> str:
+        return f"[blink]{self.message}[/]"
+
+
 class ChessScreen(Screen):
+    message = reactive("Placeholder for messages", always_update=True)
+
+    BINDINGS = [
+        ("f1", "show_options", "Options"),
+    ]
     message = reactive("Placeholder for messages", always_update=True)
 
     BINDINGS = [
@@ -125,6 +162,10 @@ class ChessScreen(Screen):
         self.bot_type = bot_type
         self.bot = get_bot_by_type(bot_type)
 
+        if self.bot:
+            black_player = self.bot.as_player('black')
+        else:
+            black_player = ChessPlayer(name="Opponent", color="black", is_bot=False)
         if self.bot:
             black_player = self.bot.as_player('black')
         else:
@@ -142,6 +183,7 @@ class ChessScreen(Screen):
         with Grid(classes="chess-container", ):
             yield self.chessboard
             yield self.info_panel
+            yield MessageBox(classes="span2 center-content message").data_bind(self.__class__.message)  # type: ignore
             yield MessageBox(classes="span2 center-content message").data_bind(self.__class__.message)  # type: ignore
         yield Footer()
 
@@ -181,7 +223,52 @@ class ChessScreen(Screen):
             capturing_player = black_player
         else:
             capturing_player = white_player
+            capturing_player = black_player
+        else:
+            capturing_player = white_player
         
+        symbol = capture.unicode_symbol(invert_color=not capture.color)
+
+        if not took_back:
+            white_player.advantage += material_value
+            black_player.advantage -= material_value
+            capturing_player.material += symbol
+        else:
+            white_player.advantage -= material_value
+            black_player.advantage += material_value
+            capturing_player.material = capturing_player.material.replace(symbol, '', 1)
+    
+
+    def on_board_message(self, message: BoardMessage):
+        self.message = message.message
+    
+    # When the user presses F1, show the options dialog
+    def action_show_options(self) -> None:
+        self.app.push_screen(ChessOptionsDialog(), callback=self.check_option)
+
+    def check_option(self, option: ChessOptions | None):
+        if option is None:
+            return
+        
+        # if option == ChessOptions.Resign:
+        #     self.info_panel.black_player.resign()
+        
+        if option == ChessOptions.CopyFEN:
+            self.app.copy_to_clipboard(self.chessboard.board.fen())
+            self.app.notify("FEN copied to clipboard")
+        
+        if option == ChessOptions.Return:
+            self.app.pop_screen()
+        
+        if option == ChessOptions.FlipBoard:
+            self.chessboard.flip_board()
+        
+        if option == ChessOptions.Takeback:
+            self.chessboard.takeback()
+        
+        if option == ChessOptions.Draw:
+            if self.chessboard.claim_draw():
+                pass
         symbol = capture.unicode_symbol(invert_color=not capture.color)
 
         if not took_back:
