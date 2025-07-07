@@ -1,28 +1,40 @@
+from operator import truediv
+import chess
+
+from rich.console import Console
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
-from rich.console import Console
 
-from textual.widgets import Static, Header, Footer
-from textual.containers import (
-    HorizontalGroup,
-    Vertical,
-    ScrollableContainer,
-    Horizontal,
-    VerticalScroll,
-    Grid,
-)
-from chessboard import ChessBoard, MoveMade, CaptureMade
+from textual import await_complete
 from textual.app import ComposeResult
-from textual.strip import Strip
+from textual.containers import (
+    Grid,
+    Horizontal,
+    HorizontalGroup,
+    ScrollableContainer,
+    Vertical,
+    VerticalScroll,
+)
+from textual.events import Key
 from textual.geometry import Size
+from textual.reactive import Reactive, reactive, var
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
-from textual.reactive import reactive, var, Reactive
-import chess
-from bot import get_bot_by_type
-from chessplayer import ChessPlayer
-from utils import strip_text
+from textual.strip import Strip
+from textual.widgets import Footer, Header, Static
+
+from textual_chess.bot import get_bot_by_type
+from textual_chess.chessboard import (
+    BoardMessage,
+    CaptureMade,
+    ChessBoard,
+    MoveMade,
+    TookBack,
+)
+from textual_chess.chessplayer import ChessPlayer
+from textual_chess.dialog import ChessOptionsDialog, ChessOptions
+from textual_chess.utils import strip_text
 
 
 class MovesList(ScrollView):
@@ -93,9 +105,19 @@ class InfoPanel(Static):
         self.moves_list.update_moves(board)
 
 
+class MessageBox(Static):
+    message = reactive("Placeholder")
+
+    def render(self) -> str:
+        return f"[blink]{self.message}[/]"
+
+
 class ChessScreen(Screen):
-    material = reactive(0)
-    message = reactive("")
+    message = reactive("Placeholder for messages", always_update=True)
+
+    BINDINGS = [
+        ("f1", "show_options", "Options"),
+    ]
 
     def __init__(self, bot_type: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -103,7 +125,10 @@ class ChessScreen(Screen):
         self.bot_type = bot_type
         self.bot = get_bot_by_type(bot_type)
 
-        black_player = self.bot.as_player('black')
+        if self.bot:
+            black_player = self.bot.as_player('black')
+        else:
+            black_player = ChessPlayer(name="Opponent", color="black", is_bot=False)
         white_player = ChessPlayer(name="You", color="white", is_bot=False)
 
         self.info_panel = InfoPanel(
@@ -117,7 +142,7 @@ class ChessScreen(Screen):
         with Grid(classes="chess-container", ):
             yield self.chessboard
             yield self.info_panel
-            yield Static(f"[blink]{self.message}[/]", classes="span2 center-content")
+            yield MessageBox(classes="span2 center-content message").data_bind(self.__class__.message)  # type: ignore
         yield Footer()
 
     def on_mount(self) -> None:
@@ -128,12 +153,20 @@ class ChessScreen(Screen):
 
     async def on_capture_made(self, message: CaptureMade):
         capture = message.capture
-        color = 'white' if capture.color == chess.WHITE else 'black'
-        players = self.query(ChessPlayer)
-        assert len(players) == 2, "Expected 2 players"
+
+        self.adjust_material_advantage(capture)
         
-        # black player was yielded first
-        black_player, white_player = players
+        await self.on_move_made(message)
+    
+    async def on_took_back(self, message: TookBack):
+        self.info_panel.update_moves(message.board)
+        if message.board.is_capture(message.move):
+            assert message.capture is not None
+            self.adjust_material_advantage(message.capture, took_back=True)
+    
+    def adjust_material_advantage(self, capture: chess.Piece, *, took_back: bool = False):
+        black_player = self.info_panel.black_player
+        white_player = self.info_panel.white_player
         material_values = {
             'p': 1,
             'n': 3,
@@ -147,15 +180,49 @@ class ChessScreen(Screen):
         # -3 is an advantage for black and +3 is an advantage for white
         if capture.color == chess.WHITE:
             material_value *= -1
+            capturing_player = black_player
+        else:
+            capturing_player = white_player
         
-        white_player.advantage += material_value
-        black_player.advantage -= material_value
+        symbol = capture.unicode_symbol(invert_color=not capture.color)
+
+        if not took_back:
+            white_player.advantage += material_value
+            black_player.advantage -= material_value
+            capturing_player.material += symbol
+        else:
+            white_player.advantage -= material_value
+            black_player.advantage += material_value
+            capturing_player.material = capturing_player.material.replace(symbol, '', 1)
+    
+
+    def on_board_message(self, message: BoardMessage):
+        self.message = message.message
+    
+    # When the user presses F1, show the options dialog
+    def action_show_options(self) -> None:
+        self.app.push_screen(ChessOptionsDialog(), callback=self.check_option)
+
+    def check_option(self, option: ChessOptions | None):
+        if option is None:
+            return
         
-        self.material += material_value
+        # if option == ChessOptions.Resign:
+        #     self.info_panel.black_player.resign()
         
-        for player in players:
-            if player.color != color:
-                player.material += capture.unicode_symbol(invert_color=not capture.color)
-                break
+        if option == ChessOptions.CopyFEN:
+            self.app.copy_to_clipboard(self.chessboard.board.fen())
+            self.app.notify("FEN copied to clipboard")
         
-        await self.on_move_made(message)
+        if option == ChessOptions.Return:
+            self.app.pop_screen()
+        
+        if option == ChessOptions.FlipBoard:
+            self.chessboard.flip_board()
+        
+        if option == ChessOptions.Takeback:
+            self.chessboard.takeback()
+        
+        if option == ChessOptions.Draw:
+            if self.chessboard.claim_draw():
+                pass

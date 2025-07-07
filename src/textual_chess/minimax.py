@@ -1,5 +1,5 @@
 import chess
-import random
+
 
 PIECE_VALUES = {
     chess.PAWN: 100,
