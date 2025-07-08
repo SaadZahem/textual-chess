@@ -70,11 +70,33 @@ class MovesList(ScrollView):
                 m2 = ""
         
         if m1 or m2:
-            return strip_text(f"{n:>2}. [dim]{m1:<7} {m2:<7}[/]")
+            return self.make_strip(n, m1, m2)
         else:
             return Strip.blank(cell_length=20)
+    
+    def make_strip(self, n: int, m1: str, m2: str) -> Strip:
+        return strip_text(''.join([
+            f"{n:>2}. ",
+            self.make_link(m1, 2 * n - 1),
+            ' ',
+            self.make_link(m2, 2 * n),
+        ]))
+    
+    def make_link(self, move: str, ply: int) -> str:
+        if move == '..':
+            return f"[dim]{move.ljust(7)}[/]"
+        if not move:
+            return ' ' * 7
+        
+        # Make a clickable link
+        link = f"[dim][@click=click('{move}', {ply})]"
+        move = move.ljust(8).replace(' ', '[/]', 1)
+        return link + move + "[/]"
+    
+    def action_click(self, move: str, ply: int):
+        self.notify(f"Clicked {move} at ply {ply}")
 
-    def update_moves(self, board: chess.Board):
+    def update_moves(self, board: chess.Board, game_over: bool):
         moves = list(board.move_stack)
         san_moves = []
         temp_board = chess.Board()
@@ -82,7 +104,7 @@ class MovesList(ScrollView):
             san_moves.append(temp_board.san(move))
             temp_board.push(move)
         
-        self.game_over = board.is_game_over()
+        self.game_over = game_over
         self.moves_list = san_moves
         self.virtual_size = Size(20, len(san_moves))
         self.scroll_end(animate=False)
@@ -101,8 +123,8 @@ class InfoPanel(Static):
         yield self.moves_list
         yield self.white_player
 
-    def update_moves(self, board: chess.Board):
-        self.moves_list.update_moves(board)
+    def update_moves(self, board: chess.Board, game_over: bool = False):
+        self.moves_list.update_moves(board, game_over)
 
 
 class MessageBox(Static):
@@ -149,7 +171,7 @@ class ChessScreen(Screen):
         self.query_one(ChessBoard).focus()
 
     async def on_move_made(self, message: MoveMade):
-        self.info_panel.update_moves(message.board)
+        self.info_panel.update_moves(message.board, message.game_over)
 
     async def on_capture_made(self, message: CaptureMade):
         capture = message.capture

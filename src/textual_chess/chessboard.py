@@ -13,7 +13,7 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from textual_chess.bot import Bot
-from textual_chess.chess import BetterBoard
+from textual_chess._chess import BetterBoard
 from textual_chess.constants import (
     BLACK_PIECE_COLOR,
     CURSOR_BORDER_COLOR,
@@ -33,6 +33,8 @@ class MoveMade(Message):
         self.board = board
         self.move = move
 
+        # default value, changed to True by ChessBoard#on_move_made
+        self.game_over = False
 
 class CaptureMade(MoveMade):
     def __init__(self, board: chess.Board, move: chess.Move, capture: chess.Piece):
@@ -367,8 +369,10 @@ class ChessBoard(Static):
         self.board.push(move)
         self.check_outcome(claim_draw=claim_draw)
         
-        if claim_draw and self.game_over:
-            self.notify("A draw was made")
+        if self.game_over:
+            message.game_over = True
+            if claim_draw:
+                self.notify("A draw was made")
     
     def on_capture_made(self, message: CaptureMade):
         self.transpositions.clear()
