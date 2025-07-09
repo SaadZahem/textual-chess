@@ -369,6 +369,12 @@ class ChessBoard(Static):
 
         if self.bot is None:
             return
+        
+        # Adresses the issue where the player can press back button
+        # too quickly before the bot plays the move
+        if self.ply:
+            self.ply = 0
+            await self.app.action_bell()
 
         move = self.bot.choose_move(self.board)
         if move:

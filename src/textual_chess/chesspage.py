@@ -1,4 +1,5 @@
-from operator import truediv
+from typing import Callable
+
 import chess
 
 from rich.console import Console
@@ -9,6 +10,7 @@ from rich.text import Text
 
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import (
     Grid,
     Horizontal,
@@ -16,6 +18,7 @@ from textual.containers import (
     ScrollableContainer,
     Vertical,
     VerticalScroll,
+    HorizontalScroll,
 )
 from textual.events import Key
 from textual.geometry import Size
@@ -24,7 +27,8 @@ from textual.reactive import Reactive, reactive, var
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import Footer, Header, Static
+from textual.widget import Widget
+from textual.widgets import Button, Footer, Header, Label, Static
 
 from textual_chess.bot import get_bot_by_type
 from textual_chess.chessboard import (
@@ -42,6 +46,12 @@ from textual_chess.utils import strip_text
 class MovesList(ScrollView):
     game_over = var(False)
     ply = var(0)
+    """
+    ply (-1) points to the current move in the moves list
+    ply == 0 means the last move and the board is active
+    ply == 1..len(moves_list) means the move is being viewed and the board is inactive
+    validation takes place to convert ply==len(moves_list) to ply==0
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -60,15 +70,18 @@ class MovesList(ScrollView):
         
         moves = self.moves_list
         m1, m2 = '', ''
+        game_over = self.game_over
         
         try:
+            game_over = game_over or moves[-1].endswith('#')
+            self.game_over = game_over
             m1, m2 = moves[y], moves[y+1]
         except IndexError:
             if y+1 == len(moves):
                 m1 = moves[y]
-                m2 = ".." if not self.game_over else ""
+                m2 = ".." if not game_over else ""
             elif y == len(moves):
-                m1 = ".." if not self.game_over else ""
+                m1 = ".." if not game_over else ""
                 m2 = ""
         
         if m1 or m2:
@@ -151,12 +164,55 @@ class InfoPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield self.black_player
-        self.moves_list = MovesList()
-        yield self.moves_list
+        yield MovesList()
+        yield from self.moves_list_controls()
         yield self.white_player
 
     def update_moves(self, board: chess.Board, game_over: bool = False):
-        self.moves_list.update_moves(board, game_over)
+        self.query_one(MovesList).update_moves(board, game_over)
+    
+    def moves_list_controls(self) -> ComposeResult:
+        with HorizontalGroup(classes="controls"):
+            back_text = "<<back"
+            next_text = "next>>"
+            back_tag = "[@click=back]"
+            next_tag = "[@click=next]"
+
+            label = Label(f"     {back_tag}{back_text}[/] {next_tag}{next_text}[/]")
+            setattr(label, "action_next", lambda: self.action_step(1))
+            setattr(label, "action_back", lambda: self.action_step(-1))
+            yield label
+    
+    def action_step(self, step):
+        if step not in (-1, 1):
+            return
+        
+        moves_list = self.query_one(MovesList)
+        n = len(moves_list.moves_list)
+        ply = moves_list.ply
+
+        if n == 0:
+            return
+
+        if step > 0 and ply == 0:
+            # current: last, next: none
+            return
+        
+        if step < 0 and ply == 1:
+            # current: first, prev: none
+            return
+        
+        # before: valid(1..n, 0), after: valid(0..n)
+        if ply == 0:
+            index = n - 1
+        else:
+            index = ply - 1
+        
+        index = max(index + step, 0)
+        if index == n:
+            index -= 1
+        
+        moves_list.action_click(index + 1)
 
 
 class MessageBox(Static):
@@ -170,7 +226,9 @@ class ChessScreen(Screen):
     message = reactive("Placeholder for messages", always_update=True)
 
     BINDINGS = [
-        ("f1", "show_options", "Options"),
+        Binding("f1", "show_options", "Options"),
+        Binding("[", "back", "Back"),
+        Binding("]", "next", "Next"),
     ]
 
     def __init__(self, bot_type: str, *args, **kwargs):
@@ -282,3 +340,9 @@ class ChessScreen(Screen):
     @on(MovesList.Click)
     def navigate_to_move(self, message: MovesList.Click):
         self.chessboard.ply = message.ply
+    
+    def action_back(self):
+        self.info_panel.action_step(-1)
+    
+    def action_next(self):
+        self.info_panel.action_step(1)
