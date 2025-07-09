@@ -81,11 +81,11 @@ class ChessBoard(Static):
     can_focus = True
     cursor_x = var(0)
     cursor_y = var(7)
-    selected = var(None)  # The square that is currently selected
+    selected: var[chess.Square | None] = var(None)  # The square that is currently selected
     message = var("")
-    last_move = var(None)  # Track the last move
     show_menu = False
     flipped = reactive(False)
+    ply = var(0)
 
     BINDINGS = [
         Binding("a,b,c,d,e,f,g,h", "move_file", "File", show=True),
@@ -98,12 +98,60 @@ class ChessBoard(Static):
     def __init__(self, *args, bot: Bot | None, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot = bot
-        self.board = chess.Board()
+        self._board = chess.Board()
+        self._alt_board = None
         self.bot_timer = None
         self.transpositions = Counter()
         self.game_over = False
 
         self.transpositions.update((self.board._transposition_key(), ))
+
+    @property
+    def board(self) -> chess.Board:
+        if self.ply:
+            assert self._alt_board is not None
+            return self._alt_board
+        else:
+            return self._board
+    
+    @property
+    def last_move(self) -> chess.Move | None:
+        if self.board.move_stack:
+            return self.board.peek()
+        else:
+            return None
+    
+    def validate_ply(self, ply: int) -> int:
+        if ply == len(self._board.move_stack):
+            return 0
+        
+        return ply
+    
+    def watch_ply(self, ply: int):
+        if ply == 0:
+            self._alt_board = None
+            self.selected = None
+            self.refresh()
+            return
+
+        try:
+            should_recopy = ply > len(self._alt_board.move_stack)  # type: ignore
+        except AttributeError:
+            should_recopy = True
+
+        if should_recopy:
+            board = self._board.copy()
+            n = len(board.move_stack) - ply
+        else:
+            board = self._alt_board
+            assert board is not None
+            n = len(board.move_stack) - ply
+        
+        for _ in range(n):
+            board.pop()
+
+        self._alt_board = board
+        self.refresh()
 
     def render(self) -> str:
         board_lines = []
@@ -258,6 +306,9 @@ class ChessBoard(Static):
     async def handle_square_selection(self):
         if self.game_over:
             return
+        
+        if self.ply:
+            return
 
         square = chess.square(self.cursor_x, self.cursor_y)
         if self.selected is None:
@@ -286,7 +337,6 @@ class ChessBoard(Static):
                 else:
                     self.post_message(MoveMade(self.board, move))
                 self.board.push(move)
-                self.last_move = move  # Track last move
                 self.selected = None
                 self.post_message(BoardMessage(""))
 
@@ -348,7 +398,6 @@ class ChessBoard(Static):
                 else:
                     self.post_message(MoveMade(self.board, move))
                 self.board.push(move)
-                self.last_move = move  # Track last move
             else:
                 self.post_message(BoardMessage("Bot attempted illegal move."))
         
@@ -411,6 +460,10 @@ class ChessBoard(Static):
         if not (0 <= board_x < 8 and 0 <= board_y < 8):
             return
         
+        if self.flipped:
+            board_x = 7 - board_x
+            board_y = 7 - board_y
+
         self.cursor_x = board_x
         self.cursor_y = board_y
         await self.handle_square_selection()
@@ -443,12 +496,16 @@ class ChessBoard(Static):
             self.post_message(TookBack(self.board.copy(), move, self.get_capture(move)))
         else:
             self.post_message(TookBack(self.board.copy(), move))
+        
         return move
 
     def takeback(self) -> bool:
         if self.game_over or self.board.is_game_over():
             self.app.notify("Cannot take back. Game is over", severity="error")
             return False
+
+        if self.ply:
+            self.ply = 0
 
         if self.board.turn == chess.WHITE:
             # Could be the first move
@@ -476,11 +533,6 @@ class ChessBoard(Static):
         if self.board.turn == chess.BLACK:
             # If it is black's turn, there is at least one move in the stack
             move = self._takeback()
-
-            if self.board.move_stack:
-                self.last_move = self.board.peek()
-            else:
-                self.last_move = None
             
             self.selected = None
             self.post_message(BoardMessage(f"Took back {self.board.san(move)}"))

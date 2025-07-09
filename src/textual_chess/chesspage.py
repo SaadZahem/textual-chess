@@ -2,11 +2,12 @@ from operator import truediv
 import chess
 
 from rich.console import Console
+import rich.repr
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 
-from textual import await_complete
+from textual import on
 from textual.app import ComposeResult
 from textual.containers import (
     Grid,
@@ -18,6 +19,7 @@ from textual.containers import (
 )
 from textual.events import Key
 from textual.geometry import Size
+from textual.message import Message
 from textual.reactive import Reactive, reactive, var
 from textual.screen import Screen
 from textual.scroll_view import ScrollView
@@ -38,14 +40,14 @@ from textual_chess.utils import strip_text
 
 
 class MovesList(ScrollView):
-    moves_list: Reactive[list[str]] = reactive(list)
     game_over = var(False)
+    ply = var(0)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # self.move_list = Static("", id="move-list")
+
         self.virtual_size = Size(20, 1)
-        # self.mount(self.move_list)
+        self.moves_list = []
 
     def render_line(self, y: int) -> Strip:
         _, scroll_y = self.scroll_offset
@@ -87,28 +89,58 @@ class MovesList(ScrollView):
             return f"[dim]{move.ljust(7)}[/]"
         if not move:
             return ' ' * 7
+
+        if ply == self.ply:
+            tag = "[bold underline]"
+            endtag = ''
+        elif self.ply == 0 and ply == len(self.moves_list):
+            tag = "[bold]"
+            endtag = ''
+        else:
+            # Make a clickable link
+            tag = f"[dim][@click=click({ply})]"
+            endtag = "[/]"
         
-        # Make a clickable link
-        link = f"[dim][@click=click('{move}', {ply})]"
         move = move.ljust(8).replace(' ', '[/]', 1)
-        return link + move + "[/]"
+        return tag + move + endtag
     
-    def action_click(self, move: str, ply: int):
-        self.notify(f"Clicked {move} at ply {ply}")
+    def action_click(self, ply: int):
+        self.ply = ply
+        self.post_message(self.Click(self.moves_list[ply - 1], ply, self.game_over))
+        self.refresh()
+    
+    def validate_ply(self, ply: int) -> int:
+        if ply == len(self.moves_list):
+            return 0
+        
+        return ply
 
     def update_moves(self, board: chess.Board, game_over: bool):
         moves = list(board.move_stack)
         san_moves = []
         temp_board = chess.Board()
         for move in moves:
-            san_moves.append(temp_board.san(move))
-            temp_board.push(move)
+            san_moves.append(temp_board.san_and_push(move))
         
         self.game_over = game_over
         self.moves_list = san_moves
-        self.virtual_size = Size(20, len(san_moves))
+        self.virtual_size = Size(20, len(san_moves) + 2 & ~1)
         self.scroll_end(animate=False)
-        self.mutate_reactive(MovesList.moves_list)
+        self.ply = 0
+        self.refresh()
+    
+    @rich.repr.auto
+    class Click(Message):
+        def __init__(self, move: str, ply: int, game_over: bool):
+            super().__init__()
+            self.move = move
+            self.ply = ply
+            self.game_over = game_over
+        
+        def __rich_repr__(self):
+            yield "move", self.move
+            yield "ply", self.ply
+            yield "game_over", self.game_over
 
 
 class InfoPanel(Static):
@@ -161,7 +193,7 @@ class ChessScreen(Screen):
     
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Grid(classes="chess-container", ):
+        with Grid(classes="chess-container"):
             yield self.chessboard
             yield self.info_panel
             yield MessageBox(classes="span2 center-content message").data_bind(self.__class__.message)  # type: ignore
@@ -227,9 +259,6 @@ class ChessScreen(Screen):
         if option is None:
             return
         
-        # if option == ChessOptions.Resign:
-        #     self.info_panel.black_player.resign()
-        
         if option == ChessOptions.CopyFEN:
             self.app.copy_to_clipboard(self.chessboard.board.fen())
             self.app.notify("FEN copied to clipboard")
@@ -246,3 +275,10 @@ class ChessScreen(Screen):
         if option == ChessOptions.Draw:
             if self.chessboard.claim_draw():
                 pass
+        
+        if option == ChessOptions.Resign:
+            pass
+    
+    @on(MovesList.Click)
+    def navigate_to_move(self, message: MovesList.Click):
+        self.chessboard.ply = message.ply
